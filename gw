@@ -1,0 +1,154 @@
+#!/bin/bash
+
+# gw - Get WiFi Script
+# Extracts MAC address and WiFi SSID/passwords for all saved networks
+# Checks for USB storage device and saves output to gw.txt if found
+
+# Function to check for USB storage and get mount point
+check_usb_storage() {
+    # Look for mounted USB devices
+    local usb_mount=$(diskutil list | grep -E "(external|USB)" | head -n 1 | awk '{print $1}')
+    if [[ -n "$usb_mount" ]]; then
+        # Get the mount point
+        local mount_point=$(diskutil info "$usb_mount" | grep "Mount Point" | awk -F: '{print $2}' | xargs)
+        if [[ -n "$mount_point" && -d "$mount_point" && -w "$mount_point" ]]; then
+            echo "$mount_point"
+            return 0
+        fi
+    fi
+    
+    # Alternative method - check /Volumes for writable USB drives
+    for volume in /Volumes/*; do
+        if [[ -d "$volume" && -w "$volume" ]]; then
+            # Check if it's likely a USB drive (not system volumes)
+            if [[ "$volume" != "/Volumes/Macintosh HD"* && "$volume" != "/Volumes/System"* ]]; then
+                echo "$volume"
+                return 0
+            fi
+        fi
+    done
+    
+    return 1
+}
+
+# Function to get MAC address
+get_mac_address() {
+    # Try to get WiFi interface MAC address
+    local wifi_interface=$(networksetup -listallhardwareports | grep -A 1 "Wi-Fi" | grep "Device" | awk '{print $2}')
+    if [[ -n "$wifi_interface" ]]; then
+        local mac_addr=$(ifconfig "$wifi_interface" | grep ether | awk '{print $2}')
+        if [[ -n "$mac_addr" ]]; then
+            echo "$mac_addr"
+            return 0
+        fi
+    fi
+    
+    # Fallback: try common WiFi interface names
+    for interface in en0 en1 en2; do
+        if ifconfig "$interface" 2>/dev/null | grep -q "status: active"; then
+            local mac_addr=$(ifconfig "$interface" | grep ether | awk '{print $2}')
+            if [[ -n "$mac_addr" ]]; then
+                echo "$mac_addr"
+                return 0
+            fi
+        fi
+    done
+    
+    echo "Unknown"
+    return 1
+}
+
+# Function to get WiFi password from keychain
+get_wifi_password() {
+    local ssid="$1"
+    local password=""
+    
+    # Try to get password from keychain
+    password=$(security find-generic-password -D "AirPort network password" -a "$ssid" -w 2>/dev/null)
+    
+    if [[ -n "$password" && "$password" != "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain." ]]; then
+        echo "$password"
+    else
+        echo "N/A"
+    fi
+}
+
+# Function to get saved WiFi networks
+get_wifi_networks() {
+    local networks=""
+    
+    # Method 1: Try networksetup to list preferred networks
+    if command -v networksetup >/dev/null 2>&1; then
+        networks=$(networksetup -listpreferredwirelessnetworks en0 2>/dev/null | grep -v "Preferred networks" | sed 's/^[[:space:]]*//')
+    fi
+    
+    # Method 2: Try parsing WiFi plist files (recovery mode may have limited access)
+    if [[ -z "$networks" ]]; then
+        local wifi_plist="/Library/Preferences/SystemConfiguration/com.apple.airport.preferences.plist"
+        if [[ -f "$wifi_plist" ]]; then
+            # Extract network names from plist (requires plutil or defaults)
+            if command -v defaults >/dev/null 2>&1; then
+                networks=$(defaults read "$wifi_plist" KnownNetworks 2>/dev/null | grep "SSID_STR" | sed 's/.*SSID_STR = "\(.*\)";.*/\1/' | sort -u)
+            fi
+        fi
+    fi
+    
+    # Method 3: Try system profiler
+    if [[ -z "$networks" ]]; then
+        if command -v system_profiler >/dev/null 2>&1; then
+            networks=$(system_profiler SPAirPortDataType 2>/dev/null | grep "Preferred Networks" -A 20 | grep -E "^[[:space:]]*[^[:space:]]" | sed 's/^[[:space:]]*//' | grep -v "Preferred Networks")
+        fi
+    fi
+    
+    echo "$networks"
+}
+
+# Main function to gather WiFi information
+get_wifi_info() {
+    echo "=== macOS WiFi Information ==="
+    
+    # Get MAC address
+    local mac_address=$(get_mac_address)
+    echo "$mac_address"
+    echo ""
+    
+    # Get saved networks
+    local networks=$(get_wifi_networks)
+    
+    if [[ -z "$networks" ]]; then
+        echo "No saved WiFi networks found or unable to access network preferences."
+        echo ""
+        echo "Note: In recovery mode, WiFi password access may be limited."
+        echo "Try running this script from a normal macOS session for full functionality."
+    else
+        echo "Saved WiFi Networks:"
+        echo "===================="
+        
+        while IFS= read -r network; do
+            if [[ -n "$network" ]]; then
+                local password=$(get_wifi_password "$network")
+                echo "$network - $password"
+            fi
+        done <<< "$networks"
+    fi
+    
+    echo ""
+    echo "Generated on: $(date)"
+}
+
+# Main execution
+echo "Scanning WiFi information..."
+output=$(get_wifi_info)
+echo "$output"
+
+# Check for USB storage and save output
+usb_path=$(check_usb_storage)
+if [[ $? -eq 0 ]]; then
+    output_file="$usb_path/gw.txt"
+    echo "$output" > "$output_file"
+    echo ""
+    echo "Output saved to: $output_file"
+else
+    echo ""
+    echo "No writable USB storage detected. Output not saved to file."
+fi
