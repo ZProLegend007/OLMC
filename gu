@@ -1,0 +1,93 @@
+#!/bin/bash
+
+# gu - Get Users Script
+# Lists all user accounts on the device with their security levels
+# Checks for USB storage device and saves output to gu.txt if found
+
+# Function to check for USB storage and get mount point
+check_usb_storage() {
+    # Look for mounted USB devices
+    local usb_mount=$(diskutil list | grep -E "(external|USB)" | head -n 1 | awk '{print $1}')
+    if [[ -n "$usb_mount" ]]; then
+        # Get the mount point
+        local mount_point=$(diskutil info "$usb_mount" | grep "Mount Point" | awk -F: '{print $2}' | xargs)
+        if [[ -n "$mount_point" && -d "$mount_point" && -w "$mount_point" ]]; then
+            echo "$mount_point"
+            return 0
+        fi
+    fi
+    
+    # Alternative method - check /Volumes for writable USB drives
+    for volume in /Volumes/*; do
+        if [[ -d "$volume" && -w "$volume" ]]; then
+            # Check if it's likely a USB drive (not system volumes)
+            if [[ "$volume" != "/Volumes/Macintosh HD"* && "$volume" != "/Volumes/System"* ]]; then
+                echo "$volume"
+                return 0
+            fi
+        fi
+    done
+    
+    return 1
+}
+
+# Function to get user security level
+get_user_level() {
+    local username="$1"
+    local user_groups=$(dscl . -read "/Users/$username" dsAttrTypeNative:_writers_passwd 2>/dev/null)
+    
+    # Check if user is admin (member of admin group)
+    if dseditgroup -o checkmember -m "$username" admin 2>/dev/null | grep -q "yes"; then
+        echo "admin"
+    # Check if it's a guest account
+    elif [[ "$username" == "Guest" ]] || dscl . -read "/Users/$username" dsAttrTypeNative:guest 2>/dev/null | grep -q "1"; then
+        echo "guest"
+    else
+        echo "user"
+    fi
+}
+
+# Main function to list all users
+list_users() {
+    echo "=== macOS User Accounts ==="
+    echo "Username - Security Level"
+    echo "=========================="
+    
+    # Get all user accounts (UID >= 500, excluding system accounts)
+    local users=$(dscl . -list /Users UniqueID | awk '$2 >= 500 {print $1}' | sort)
+    
+    if [[ -z "$users" ]]; then
+        echo "No user accounts found."
+        return
+    fi
+    
+    for user in $users; do
+        # Skip system/service accounts
+        if [[ "$user" =~ ^(_|daemon|nobody|root)$ ]]; then
+            continue
+        fi
+        
+        local level=$(get_user_level "$user")
+        echo "$user - $level"
+    done
+    
+    echo ""
+    echo "Generated on: $(date)"
+}
+
+# Main execution
+echo "Scanning user accounts..."
+output=$(list_users)
+echo "$output"
+
+# Check for USB storage and save output
+usb_path=$(check_usb_storage)
+if [[ $? -eq 0 ]]; then
+    output_file="$usb_path/gu.txt"
+    echo "$output" > "$output_file"
+    echo ""
+    echo "Output saved to: $output_file"
+else
+    echo ""
+    echo "No writable USB storage detected. Output not saved to file."
+fi
